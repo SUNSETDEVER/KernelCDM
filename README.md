@@ -657,7 +657,7 @@ Partially tested:
 
 Experimental:
 
-- AVR (Arduino Uno, Mega2560) - needs reduced limits, see Wiki
+- AVR (Arduino Uno, Mega2560) - needs reduced limits
 
 Not supported:
 
