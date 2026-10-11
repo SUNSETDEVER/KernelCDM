@@ -1,0 +1,56 @@
+#######################################
+# CMScript keywords for Arduino IDE
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+CDM_Value_t[TAB]KEYWORD1
+CDM_ValueType_t[TAB]KEYWORD1
+ASTNode_t[TAB]KEYWORD1
+CDM_Error_t[TAB]KEYWORD1
+CDM_Parser_t[TAB]KEYWORD1
+CDM_HostFunc_t[TAB]KEYWORD1
+CDM_HostFuncEx_t[TAB]KEYWORD1
+CDM_IncludeResolver_t[TAB]KEYWORD1
+CDM_StructDef_t[TAB]KEYWORD1
+CDM_FieldDef_t[TAB]KEYWORD1
+
+#######################################
+# Functions and methods (KEYWORD2)
+#######################################
+CMScript_Init[TAB]KEYWORD2
+CDM_Preprocess[TAB]KEYWORD2
+CDM_SetIncludeResolver[TAB]KEYWORD2
+CDM_ResetIncludes[TAB]KEYWORD2
+CDM_Parse[TAB]KEYWORD2
+CDM_Execute[TAB]KEYWORD2
+CDM_FreeAST[TAB]KEYWORD2
+CDM_PrintAST[TAB]KEYWORD2
+CDM_GetErrorCount[TAB]KEYWORD2
+CDM_GetError[TAB]KEYWORD2
+CDM_ClearErrors[TAB]KEYWORD2
+CDM_RegisterHostFunc[TAB]KEYWORD2
+CDM_RegisterHostFuncEx[TAB]KEYWORD2
+CDM_RegisterHostFuncFloat[TAB]KEYWORD2
+CDM_MakeString[TAB]KEYWORD2
+CDM_MakeStringOwned[TAB]KEYWORD2
+CDM_MakePtr[TAB]KEYWORD2
+CDM_IsRef[TAB]KEYWORD2
+CDM_Deref[TAB]KEYWORD2
+CDM_RefPtr[TAB]KEYWORD2
+CDM_AssignRef[TAB]KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+CDM_TYPE_INT[TAB]LITERAL1
+CDM_TYPE_FLOAT[TAB]LITERAL1
+CDM_TYPE_PTR[TAB]LITERAL1
+CDM_TYPE_STRUCT[TAB]LITERAL1
+CDM_TYPE_ARRAY[TAB]LITERAL1
+CDM_TYPE_STRING[TAB]LITERAL1
+CDM_TYPE_REF[TAB]LITERAL1
+CDM_MAX_STRUCT_TYPES[TAB]LITERAL1
+CDM_MAX_FIELDS_PER_STRUCT[TAB]LITERAL1
+CDM_MAX_ERRORS[TAB]LITERAL1
