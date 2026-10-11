@@ -745,6 +745,8 @@ on ESP32. One word = 4 bytes. So:
 
 Not 12288 bytes. This is a common source of confusion.
 
+---
+
 ## Limitations
 
 Known limitations (not bugs):
