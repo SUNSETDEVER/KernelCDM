@@ -12,7 +12,7 @@
 #include <Arduino.h>
 #include <CMScript.h>
 
-#define INTERP_STACK_WORDS 24576
+#define INTERP_STACK_BYTES 64 * 1024
 #define INTERP_PRIORITY 1
 #define INTERP_CORE 1
 
@@ -119,10 +119,8 @@ static void interpreterTask(void* pv) {
   CDM_Execute(root);
   CDM_FreeAST(root);
 
-  UBaseType_t remain = uxTaskGetStackHighWaterMark(NULL);
-  unsigned words = (unsigned)remain;
-  unsigned bytes = words * sizeof(StackType_t);
-  printf("stack high-water: %u words (%u bytes)\n", words, bytes);
+  UBaseType_t bytes = uxTaskGetStackHighWaterMark(NULL);
+  printf("stack high-water: %u bytes\n", bytes);
 
   printf("=== done ===\n");
   vTaskDelete(NULL);
@@ -138,7 +136,7 @@ void setup() {
   xTaskCreatePinnedToCore(
     interpreterTask,
     "Interp",
-    INTERP_STACK_WORDS,
+    INTERP_STACK_BYTES,
     NULL,
     INTERP_PRIORITY,
     NULL,
