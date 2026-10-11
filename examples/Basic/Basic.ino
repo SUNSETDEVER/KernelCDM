@@ -28,7 +28,7 @@
 //      __print_float  - for floats
 //
 //  All three arrive with argc >= 1 and argv[0] holding the text
-//  to print. Here we just forward to printf().
+//  to print. Here we just forward to Serial.print().
 // ------------------------------------------------------------
 static int serial_print(int argc, const char** argv) {
     if (argc >= 1) Serial.print(argv[0]);
@@ -38,43 +38,47 @@ static int serial_print(int argc, const char** argv) {
 // ------------------------------------------------------------
 //  The script itself
 // ------------------------------------------------------------
-//  Stored as a C string. Every line ends with "\n" so the
-//  tokenizer sees proper line breaks (needed for error line
-//  numbers and for preprocessor directives to work).
+//  Stored as a C++11 raw string literal R"CDM(...)CDM".
 //
-//  If you want to use a raw string literal R"(...)" instead,
-//  remember that leading whitespace is preserved, which is
-//  usually fine.
+//  Why "CDM" as the delimiter? Because script code often
+//  contains quotes and newlines. With a raw string literal:
+//
+//    - newlines are real newlines, not "\n"
+//    - quotes are real quotes, not \"
+//
+//  The only rule: the sequence )CDM" must not appear inside
+//  the script. If you ever need )" in a script, change the
+//  delimiter to something else, e.g. R"CODE(...)CODE".
 // ------------------------------------------------------------
-static const char* src =
+static const char* src = R"CDM(int main() {
     // A simple computation and output
-    "int main() {\n"
-    "    std::cout << \"hello CMScript\\n\";\n"   // \\n -> \n in script
-    "\n"
-    "    int a = 3;\n"
-    "    int b = 4;\n"
-    "    std::cout << \"a + b = \" << (a + b) << \"\\n\";\n"
-    "\n"
-    "    int c = a * b;\n"
-    "    std::cout << \"a * b = \" << c << \"\\n\";\n"
-    "\n"
-    "    // Loop from 0 to 4\n"
-    "    for (int i = 0; i < 5; i++) {\n"
-    "        std::cout << \"i = \" << i << \"\\n\";\n"
-    "    }\n"
-    "\n"
-    "    // A tiny function with a return value\n"
-    "    int sq = square(5);\n"
-    "    std::cout << \"square(5) = \" << sq << \"\\n\";\n"
-    "\n"
-    "    return 0;\n"
-    "}\n"
-    "\n"
-    // User function defined outside main(). The engine collects
-    // all top-level functions before running main().
-    "int square(int x) {\n"
-    "    return x * x;\n"
-    "}\n";
+    std::cout << "hello CMScript\n";
+
+    int a = 3;
+    int b = 4;
+    std::cout << "a + b = " << (a + b) << "\n";
+
+    int c = a * b;
+    std::cout << "a * b = " << c << "\n";
+
+    // Loop from 0 to 4
+    for (int i = 0; i < 5; i++) {
+        std::cout << "i = " << i << "\n";
+    }
+
+    // Call a user-defined function
+    int sq = square(5);
+    std::cout << "square(5) = " << sq << "\n";
+
+    return 0;
+}
+
+// User function defined outside main(). The engine collects
+// all top-level functions before running main().
+int square(int x) {
+    return x * x;
+}
+)CDM";
 
 // ------------------------------------------------------------
 //  setup() - runs once at boot
@@ -104,9 +108,6 @@ void setup() {
     // ---- Step 3: preprocess ----
     //  Expands #define / #ifdef / #include, strips comments in
     //  strings safely, and returns a new malloc'd buffer.
-    //
-    //  If you don't use any preprocessor directives, you can
-    //  pass src directly to CDM_Parse and skip this step.
     char* pre = CDM_Preprocess(src);
     if (!pre) {
         Serial.print("preprocess failed\n");
@@ -129,8 +130,9 @@ void setup() {
     if (errs > 0) {
         for (int i = 0; i < errs; i++) {
             const CDM_Error_t* e = CDM_GetError(i);
-            char res[40];
-            sprintf(res, "Error at line %d: %s\n", e->line, e->message);
+            char res[128];
+            snprintf(res, sizeof(res),
+                     "Error at line %d: %s\n", e->line, e->message);
             Serial.print(res);
         }
         CDM_FreeAST(root);

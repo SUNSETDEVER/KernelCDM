@@ -13,7 +13,7 @@
 //      fwrite(str, fp)           -> int
 //      feof(fp)                  -> 0 or 1
 //
-//  IMPORTANT: fopen() uses the C library's VFS path. On ESP32(For Example)
+//  IMPORTANT: fopen() uses the C library's VFS path. On ESP32,
 //  this means you MUST mount a filesystem first and use the
 //  mount-point prefix in the path.
 //
@@ -80,65 +80,66 @@ static int serial_print(int argc, const char** argv) {
 // ------------------------------------------------------------
 static const char* src =
     "#define FILE_PATH \"" FS_PREFIX "test.txt\"\n"
-    "\n"
-    "int main() {\n"
-    "    // --------------------------------------------------\n"
-    "    // Part 1: write to a file\n"
-    "    // --------------------------------------------------\n"
-    "    std::cout << \"-- writing --\\n\";\n"
-    "\n"
-    "    auto fp = fopen(FILE_PATH, \"w\");\n"
-    "    if (fp == 0) {\n"
-    "        std::cout << \"open for write failed\\n\";\n"
-    "        return 1;\n"
-    "    }\n"
-    "\n"
-    "    fprintf(fp, \"line 1: %d\\n\", 42);\n"
-    "    fprintf(fp, \"line 2: %s\\n\", \"hello\");\n"
-    "    fprintf(fp, \"line 3: %.2f\\n\", 3.14);\n"
-    "    fputs(\"line 4: plain text\\n\", fp);\n"
-    "\n"
-    "    fclose(fp);\n"
-    "    std::cout << \"closed.\\n\";\n"
-    "\n"
-    "    // --------------------------------------------------\n"
-    "    // Part 2: read it back line by line\n"
-    "    // --------------------------------------------------\n"
-    "    std::cout << \"-- reading --\\n\";\n"
-    "\n"
-    "    auto fp2 = fopen(FILE_PATH, \"r\");\n"
-    "    if (fp2 == 0) {\n"
-    "        std::cout << \"open for read failed\\n\";\n"
-    "        return 2;\n"
-    "    }\n"
-    "\n"
-    "    std::string line = \"\";\n"
-    "    int count = 0;\n"
-    "    while (!feof(fp2)) {\n"
-    "        line = fgets(line, 128, fp2);\n"
-    "        if (line.length() > 0) {\n"
-    "            count++;\n"
-    "            std::cout << \"[\" << count << \"] \" << line << \"\\n\";\n"
-    "        }\n"
-    "    }\n"
-    "    fclose(fp2);\n"
-    "\n"
-    "    std::cout << \"read \" << count << \" lines.\\n\";\n"
-    "\n"
-    "    // --------------------------------------------------\n"
-    "    // Part 3: append a line\n"
-    "    // --------------------------------------------------\n"
-    "    std::cout << \"-- appending --\\n\";\n"
-    "\n"
-    "    auto fp3 = fopen(FILE_PATH, \"a\");\n"
-    "    if (fp3) {\n"
-    "        fprintf(fp3, \"line 5: appended at %d\\n\", millis());\n"
-    "        fclose(fp3);\n"
-    "        std::cout << \"appended.\\n\";\n"
-    "    }\n"
-    "\n"
-    "    return 0;\n"
-    "}\n";
+    R"CDM(
+int main() {
+    // --------------------------------------------------
+    // Part 1: write to a file
+    // --------------------------------------------------
+    std::cout << "-- writing --\n";
+
+    auto fp = fopen(FILE_PATH, "w");
+    if (fp == 0) {
+        std::cout << "open for write failed\n";
+        return 1;
+    }
+
+    fprintf(fp, "line 1: %d\n", 42);
+    fprintf(fp, "line 2: %s\n", "hello");
+    fprintf(fp, "line 3: %.2f\n", 3.14);
+    fputs("line 4: plain text\n", fp);
+
+    fclose(fp);
+    std::cout << "closed.\n";
+
+    // --------------------------------------------------
+    // Part 2: read it back line by line
+    // --------------------------------------------------
+    std::cout << "-- reading --\n";
+
+    auto fp2 = fopen(FILE_PATH, "r");
+    if (fp2 == 0) {
+        std::cout << "open for read failed\n";
+        return 2;
+    }
+
+    std::string line = "";
+    int count = 0;
+    while (!feof(fp2)) {
+        line = fgets(line, 128, fp2);
+        if (line.length() > 0) {
+            count++;
+            std::cout << "[" << count << "] " << line << "\n";
+        }
+    }
+    fclose(fp2);
+
+    std::cout << "read " << count << " lines.\n";
+
+    // --------------------------------------------------
+    // Part 3: append a line
+    // --------------------------------------------------
+    std::cout << "-- appending --\n";
+
+    auto fp3 = fopen(FILE_PATH, "a");
+    if (fp3) {
+        fprintf(fp3, "line 5: appended at %d\n", millis());
+        fclose(fp3);
+        std::cout << "appended.\n";
+    }
+
+    return 0;
+}
+)CDM";
 
 // ------------------------------------------------------------
 //  Flip this to 1 to print the preprocessed script over serial.

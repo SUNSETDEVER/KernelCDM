@@ -33,52 +33,60 @@
 // ------------------------------------------------------------
 //  Script source
 // ------------------------------------------------------------
+//  Header block is built with string concatenation because the
+//  values come from #define macros. The script body below uses
+//  a raw string literal for readability.
+//
+//  C++ concatenates adjacent string literals at compile time,
+//  so this is equivalent to one big string.
+// ------------------------------------------------------------
 static const char* src =
-    "#define BUTTON_PIN     " STR(BUTTON_PIN)     "\n"
-    "#define DEBOUNCE_MS    " STR(DEBOUNCE_MS)    "\n"
-    "#define RUNTIME_MS     " STR(RUNTIME_MS)     "\n"
-    "#define POLL_INTERVAL  " STR(POLL_INTERVAL)  "\n"
-    "\n"
-    "int main() {\n"
-    "    std::cout << \"Button test start\\n\";\n"
-    "    std::cout << \"Press button on GPIO\" << BUTTON_PIN << \"\\n\";\n"
-    "\n"
-    "    pinMode(BUTTON_PIN, INPUT_PULLUP);\n"
-    "\n"
-    "    unsigned int start     = millis();\n"
-    "    unsigned int lastEdge  = 0;\n"
-    "    int          lastState = digitalRead(BUTTON_PIN);\n"
-    "    int          presses   = 0;\n"
-    "    int          releases  = 0;\n"
-    "\n"
-    "    std::cout << \"initial = \" << lastState << \"\\n\";\n"
-    "\n"
-    "    while (millis() - start < RUNTIME_MS) {\n"
-    "        int now = digitalRead(BUTTON_PIN);\n"
-    "\n"
-    "        if (now != lastState) {\n"
-    "            unsigned int t = millis();\n"
-    "            if (t - lastEdge >= DEBOUNCE_MS) {\n"
-    "                lastEdge  = t;\n"
-    "                lastState = now;\n"
-    "\n"
-    "                if (now == 0) {\n"
-    "                    presses++;\n"
-    "                    std::cout << \"press   #\" << presses << \"\\n\";\n"
-    "                } else {\n"
-    "                    releases++;\n"
-    "                    std::cout << \"release #\" << releases << \"\\n\";\n"
-    "                }\n"
-    "            }\n"
-    "        }\n"
-    "        delay(POLL_INTERVAL);\n"
-    "    }\n"
-    "\n"
-    "    std::cout << \"\\ntimeout\\n\";\n"
-    "    std::cout << \"presses  = \" << presses  << \"\\n\";\n"
-    "    std::cout << \"releases = \" << releases << \"\\n\";\n"
-    "    return 0;\n"
-    "}\n";
+    "#define BUTTON_PIN     " STR(BUTTON_PIN)    "\n"
+    "#define DEBOUNCE_MS    " STR(DEBOUNCE_MS)   "\n"
+    "#define RUNTIME_MS     " STR(RUNTIME_MS)    "\n"
+    "#define POLL_INTERVAL  " STR(POLL_INTERVAL) "\n"
+    R"CDM(
+int main() {
+    std::cout << "Button test start\n";
+    std::cout << "Press button on GPIO" << BUTTON_PIN << "\n";
+
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+    unsigned int start     = millis();
+    unsigned int lastEdge  = 0;
+    int          lastState = digitalRead(BUTTON_PIN);
+    int          presses   = 0;
+    int          releases  = 0;
+
+    std::cout << "initial = " << lastState << "\n";
+
+    while (millis() - start < RUNTIME_MS) {
+        int now = digitalRead(BUTTON_PIN);
+
+        if (now != lastState) {
+            unsigned int t = millis();
+            if (t - lastEdge >= DEBOUNCE_MS) {
+                lastEdge  = t;
+                lastState = now;
+
+                if (now == 0) {
+                    presses++;
+                    std::cout << "press   #" << presses << "\n";
+                } else {
+                    releases++;
+                    std::cout << "release #" << releases << "\n";
+                }
+            }
+        }
+        delay(POLL_INTERVAL);
+    }
+
+    std::cout << "\ntimeout\n";
+    std::cout << "presses  = " << presses  << "\n";
+    std::cout << "releases = " << releases << "\n";
+    return 0;
+}
+)CDM";
 
 // ------------------------------------------------------------
 //  Print callback

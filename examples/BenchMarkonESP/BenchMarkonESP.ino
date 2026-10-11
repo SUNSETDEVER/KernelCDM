@@ -12,7 +12,7 @@
 #include <Arduino.h>
 #include <CMScript.h>
 
-#define INTERP_STACK_BYTES 64 * 1024
+#define INTERP_STACK_BYTES 24 * 1024
 #define INTERP_PRIORITY 1
 #define INTERP_CORE 1
 
@@ -27,46 +27,46 @@
 //  Each runs for 1 second of wall-clock time, using an inner
 //  loop of 1000 iterations between millis() checks.
 // ------------------------------------------------------------
-static const char* src =
-  "int main() {\n"
-  "    uint32_t start;\n"
-  "    uint32_t n;\n"
-  "\n"
-  "    // ---- 1. integer add ----\n"
-  "    uint32_t i32Add = 0;\n"
-  "    start = millis();\n"
-  "    while (millis() - start < 1000) {\n"
-  "        for (n = 0; n < 1000; n++) {\n"
-  "            i32Add += 1;\n"
-  "        }\n"
-  "    }\n"
-  "    std::cout << i32Add << \" int adds per second\\n\";\n"
-  "\n"
-  "    // ---- 2. float add ----\n"
-  "    float floatAdd = 0.0f;\n"
-  "    start = millis();\n"
-  "    while (millis() - start < 1000) {\n"
-  "        for (n = 0; n < 1000; n++) {\n"
-  "            floatAdd += 1.0f;\n"
-  "        }\n"
-  "    }\n"
-  "    std::cout << (uint32_t)floatAdd << \" float adds per second\\n\";\n"
-  "\n"
-  "    // ---- 3. multiply ----\n"
-  "    uint32_t mulAdd = 1;\n"
-  "    uint32_t mulCount = 0;\n"
-  "    start = millis();\n"
-  "    while (millis() - start < 1000) {\n"
-  "        for (n = 0; n < 1000; n++) {\n"
-  "            mulAdd = mulAdd * 2 + 1;\n"
-  "            if (mulAdd > 1000000) mulAdd = 1;\n"
-  "            mulCount++;\n"
-  "        }\n"
-  "    }\n"
-  "    std::cout << mulCount << \" mul ops per second\\n\";\n"
-  "\n"
-  "    return 0;\n"
-  "}\n";
+static const char* src = R"CDM(int main() {
+    uint32_t start;
+    uint32_t n;
+
+    // ---- 1. integer add ----
+    uint32_t i32Add = 0;
+    start = millis();
+    while (millis() - start < 1000) {
+        for (n = 0; n < 1000; n++) {
+            i32Add += 1;
+        }
+    }
+    std::cout << i32Add << " int adds per second\n";
+
+    // ---- 2. float add ----
+    float floatAdd = 0.0f;
+    start = millis();
+    while (millis() - start < 1000) {
+        for (n = 0; n < 1000; n++) {
+            floatAdd += 1.0f;
+        }
+    }
+    std::cout << (uint32_t)floatAdd << " float adds per second\n";
+
+    // ---- 3. multiply ----
+    uint32_t mulAdd = 1;
+    uint32_t mulCount = 0;
+    start = millis();
+    while (millis() - start < 1000) {
+        for (n = 0; n < 1000; n++) {
+            mulAdd = mulAdd * 2 + 1;
+            if (mulAdd > 1000000) mulAdd = 1;
+            mulCount++;
+        }
+    }
+    std::cout << mulCount << " mul ops per second\n";
+
+    return 0;
+}
+)CDM";
 
 // ------------------------------------------------------------
 //  Print callback
@@ -120,7 +120,7 @@ static void interpreterTask(void* pv) {
   CDM_FreeAST(root);
 
   UBaseType_t bytes = uxTaskGetStackHighWaterMark(NULL);
-  printf("stack high-water: %u bytes\n", bytes);
+  printf("stack high-water: %u bytes, %u used\n", bytes, INTERP_STACK_BYTES - bytes);
 
   printf("=== done ===\n");
   vTaskDelete(NULL);
