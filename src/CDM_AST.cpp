@@ -8,6 +8,51 @@
 #include <time.h>
 
 // ============================================================
+//  AVR 兼容：atoll / strtoll 在 avr-libc 里不可用，手写
+// ============================================================
+static int64_t cdm_atoll(const char* s) {
+  if (!s) return 0;
+  int64_t r = 0;
+  int sign = 1;
+  while (*s == ' ' || *s == '\t') s++;
+  if (*s == '-') { sign = -1; s++; }
+  else if (*s == '+') s++;
+  while (*s >= '0' && *s <= '9') {
+    r = r * 10 + (*s - '0');
+    s++;
+  }
+  return sign * r;
+}
+
+static int64_t cdm_strtoll(const char* s, int base) {
+  if (!s) return 0;
+  int64_t r = 0;
+  int sign = 1;
+  int auto_base = (base == 0);
+  while (*s == ' ' || *s == '\t') s++;
+  if (*s == '-') { sign = -1; s++; }
+  else if (*s == '+') s++;
+  if (auto_base) {
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+    else if (s[0] == '0') { base = 8; s++; }
+    else base = 10;
+  } else if (base == 16) {
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+  }
+  while (*s) {
+    int d;
+    if (*s >= '0' && *s <= '9') d = *s - '0';
+    else if (*s >= 'a' && *s <= 'f') d = *s - 'a' + 10;
+    else if (*s >= 'A' && *s <= 'F') d = *s - 'A' + 10;
+    else break;
+    if (d >= base) break;
+    r = r * base + d;
+    s++;
+  }
+  return sign * r;
+}
+
+// ============================================================
 //  常量
 // ============================================================
 #define CDM_MAX_HOST_FUNCS 128
@@ -53,11 +98,11 @@ static int g_cdm_allocated = 0;
 static int g_break_flag = 0;
 static int g_continue_flag = 0;
 
-/* ★ 行号 */
 static int g_parse_line = 1;
 static int g_current_line = 0;
 
-/* ★ enum 常量表 */
+static int g_panic_mode = 0;
+
 #define MAX_ENUM_ENTRIES 128
 typedef struct {
   char    name[64];
@@ -165,12 +210,17 @@ static CDM_Error_t g_errors[CDM_MAX_ERRORS];
 static int g_error_count = 0;
 static int g_error_overflow = 0;
 
-void CDM_ClearErrors(void) { g_error_count = 0; g_error_overflow = 0; }
+void CDM_ClearErrors(void) {
+  g_error_count = 0;
+  g_error_overflow = 0;
+  g_panic_mode = 0;
+}
 int CDM_GetErrorCount(void) { return g_error_count + (g_error_overflow ? 1 : 0); }
 const CDM_Error_t* CDM_GetError(int idx) {
   if (idx < 0 || idx >= g_error_count) return NULL;
   return &g_errors[idx];
 }
+
 static void report_error(CDM_Parser_t* p, const char* fmt, ...) {
   if (g_error_count >= CDM_MAX_ERRORS) { g_error_overflow = 1; return; }
   CDM_Error_t* e = &g_errors[g_error_count++];
@@ -371,7 +421,7 @@ static double val_to_double_raw(CDM_Value_t v) {
 static int64_t val_to_int_raw(CDM_Value_t v) {
   if (v.type == CDM_TYPE_FLOAT) return (int64_t)v.v.f;
   if (v.type == CDM_TYPE_PTR) return (int64_t)(intptr_t)v.v.p;
-  if (v.type == CDM_TYPE_STRING && v.v.p) return atoll((const char*)v.v.p);
+  if (v.type == CDM_TYPE_STRING && v.v.p) return cdm_atoll((const char*)v.v.p);
   return v.v.i;
 }
 static const char* val_to_str_raw(CDM_Value_t v) {
@@ -714,6 +764,10 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi);
 static ASTNode_t* parse_struct_def(CDM_Parser_t* p);
 static ASTNode_t* parse_enum(CDM_Parser_t* p);
 
+// ============================================================
+//  匹配辅助 + ★ 编译错误抛出机制
+// ============================================================
+
 static int match_op(CDM_Parser_t* p, const char* op) {
   if (p->cur.type == TOK_OP && strcmp(p->cur.text, op) == 0) { next_token(p); return 1; }
   return 0;
@@ -726,6 +780,78 @@ static int match_kw(CDM_Parser_t* p, const char* kw) {
   if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, kw) == 0) { next_token(p); return 1; }
   return 0;
 }
+
+/* ★ 必须匹配，否则报错并进入 panic 恢复 */
+static void require_punct(CDM_Parser_t* p, const char* c) {
+  if (p->cur.type == TOK_PUNCT && strcmp(p->cur.text, c) == 0) {
+    next_token(p);
+  } else if (p->cur.type == TOK_EOF) {
+    report_error(p, "expected '%s' at end of file", c);
+    g_panic_mode = 1;
+  } else {
+    report_error(p, "expected '%s', got '%s'", c, p->cur.text);
+    g_panic_mode = 1;
+  }
+}
+
+/* ★ 必须匹配一个运算符 */
+static void require_op(CDM_Parser_t* p, const char* op) {
+  if (p->cur.type == TOK_OP && strcmp(p->cur.text, op) == 0) {
+    next_token(p);
+  } else if (p->cur.type == TOK_EOF) {
+    report_error(p, "expected '%s' at end of file", op);
+    g_panic_mode = 1;
+  } else {
+    report_error(p, "expected '%s', got '%s'", op, p->cur.text);
+    g_panic_mode = 1;
+  }
+}
+
+/* ★ 必须匹配一个标识符，并把名字拷到 out */
+static int require_identifier(CDM_Parser_t* p, char* out, int out_size) {
+  if (p->cur.type == TOK_IDENT) {
+    strncpy(out, p->cur.text, out_size - 1);
+    out[out_size - 1] = '\0';
+    next_token(p);
+    return 1;
+  }
+  if (p->cur.type == TOK_EOF) {
+    report_error(p, "expected identifier at end of file");
+  } else {
+    report_error(p, "expected identifier, got '%s'", p->cur.text);
+  }
+  g_panic_mode = 1;
+  out[0] = '\0';
+  return 0;
+}
+
+/* ★ panic 恢复：跳过 token 直到遇到一个"同步点" */
+static void skip_to_sync(CDM_Parser_t* p) {
+  int guard = 0;
+  while (p->cur.type != TOK_EOF && guard < 256) {
+    /* 遇到 ; 或 } 就停（且不消费，让调用方处理） */
+    if (p->cur.type == TOK_PUNCT) {
+      if (p->cur.text[0] == ';') return;
+      if (p->cur.text[0] == '}') return;
+    }
+    next_token(p);
+    guard++;
+  }
+  /* 停在 ; 或 } 前，调用方决定怎么处理 */
+}
+
+/* ★ 报错后恢复：跳到下一个 ; 或 }，然后消费掉分号（如果有） */
+static void recover_statement(CDM_Parser_t* p) {
+  skip_to_sync(p);
+  if (p->cur.type == TOK_PUNCT && p->cur.text[0] == ';') {
+    next_token(p);
+  }
+  g_panic_mode = 0;
+}
+
+// ============================================================
+//  类型关键字
+// ============================================================
 static int is_type_keyword(CDM_Parser_t* p) {
   if (p->cur.type != TOK_KEYWORD) return 0;
   const char* t = p->cur.text;
@@ -756,7 +882,7 @@ static ASTNode_t* parse_args(CDM_Parser_t* p) {
       if (!match_punct(p, ",")) break;
     }
   }
-  match_punct(p, ")");
+  require_punct(p, ")");
   call->arg_count = argc;
   if (argc > 0) {
     call->args = (ASTNode_t**)calloc(argc, sizeof(ASTNode_t*));
@@ -769,7 +895,8 @@ static ASTNode_t* parse_new(CDM_Parser_t* p) {
   match_kw(p, "new");
   ASTNode_t* n = new_node(AST_NEW);
   if (p->cur.type != TOK_IDENT && !is_type_keyword(p)) {
-    report_error(p, "Expected type after 'new'");
+    report_error(p, "expected type after 'new', got '%s'", p->cur.text);
+    g_panic_mode = 1;
     return n;
   }
   strncpy(n->name, p->cur.text, 63);
@@ -785,7 +912,7 @@ static ASTNode_t* parse_new(CDM_Parser_t* p) {
     if (p->cur.type != TOK_PUNCT || p->cur.text[0] != ']') {
       n->left = parse_expression(p);
     }
-    match_punct(p, "]");
+    require_punct(p, "]");
     n->type = AST_NEW_ARRAY;
   }
   return n;
@@ -801,7 +928,7 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
     if (strchr(p->cur.text, '.') || strchr(p->cur.text, 'e') || strchr(p->cur.text, 'E'))
       n->fval = atof(p->cur.text);
     else
-      n->ival = (int64_t)strtoll(p->cur.text, NULL, 0);
+      n->ival = cdm_strtoll(p->cur.text, 0);
     next_token(p);
     return n;
   }
@@ -812,10 +939,13 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
     return n;
   }
 
-  /* ★ sizeof */
+  /* sizeof */
   if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "sizeof") == 0) {
     next_token(p);
-    match_punct(p, "(");
+    if (!match_punct(p, "(")) {
+      report_error(p, "expected '(' after sizeof");
+      g_panic_mode = 1;
+    }
     if (is_type_keyword(p)) {
       const char* t = p->cur.text;
       int64_t sz = 4;
@@ -830,14 +960,14 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
         sz = 8;
         next_token(p);
       }
-      match_punct(p, ")");
+      require_punct(p, ")");
       ASTNode_t* n = new_node(AST_NUMBER);
       n->ival = sz;
       snprintf(n->name, 63, "%lld", (long long)sz);
       return n;
     }
     ASTNode_t* e = parse_expression(p);
-    match_punct(p, ")");
+    require_punct(p, ")");
     ASTNode_t* sz_node = new_node(AST_SIZEOF);
     sz_node->left = e;
     return sz_node;
@@ -859,7 +989,7 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
         is_ptr = 1;
         next_token(p);
       }
-      match_punct(p, ")");
+      require_punct(p, ")");
       ASTNode_t* cast = new_node(AST_CAST);
       cast->decl_type = is_ptr ? CDM_TYPE_PTR : target;
       cast->is_ptr = is_ptr;
@@ -872,7 +1002,7 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
     p->cur = saved_tok;
     next_token(p);
     ASTNode_t* n = parse_expression(p);
-    match_punct(p, ")");
+    require_punct(p, ")");
     return n;
   }
 
@@ -917,14 +1047,15 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
       if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '[') {
         next_token(p);
         ASTNode_t* idx = parse_expression(p);
-        match_punct(p, "]");
+        require_punct(p, "]");
         ASTNode_t* sub = new_node(AST_ARRAY_SUBSCRIPT);
         sub->left = base; sub->right = idx; base = sub;
         had_suffix = 1;
       } else if (p->cur.type == TOK_OP && strcmp(p->cur.text, ".") == 0) {
         next_token(p);
         if (p->cur.type != TOK_IDENT) {
-          report_error(p, "Expected member name after '.'");
+          report_error(p, "expected member name after '.', got '%s'", p->cur.text);
+          g_panic_mode = 1;
           break;
         }
         char member[64];
@@ -991,7 +1122,9 @@ static ASTNode_t* parse_primary(CDM_Parser_t* p) {
     }
     return base;
   }
-  report_error(p, "Unexpected token '%s' in expression", p->cur.text);
+
+  report_error(p, "unexpected token '%s' in expression", p->cur.text);
+  g_panic_mode = 1;
   ASTNode_t* n = new_node(AST_NUMBER);
   n->ival = 0;
   next_token(p);
@@ -1052,9 +1185,7 @@ static ASTNode_t* parse_expression(CDM_Parser_t* p) {
   if (p->cur.type == TOK_OP && strcmp(p->cur.text, "?") == 0) {
     next_token(p);
     ASTNode_t* then_e = parse_expression(p);
-    if (!match_op(p, ":")) {
-      report_error(p, "Expected ':' in ternary");
-    }
+    require_op(p, ":");
     ASTNode_t* else_e = parse_expression(p);
     ASTNode_t* t = new_node(AST_TERNARY);
     t->left = cond;
@@ -1070,9 +1201,9 @@ static ASTNode_t* parse_expression(CDM_Parser_t* p) {
 // ============================================================
 static ASTNode_t* parse_if(CDM_Parser_t* p) {
   match_kw(p, "if");
-  match_punct(p, "(");
+  require_punct(p, "(");
   ASTNode_t* cond = parse_expression(p);
-  match_punct(p, ")");
+  require_punct(p, ")");
   ASTNode_t* node = new_node(AST_IF);
   node->left = cond;
   node->body = parse_statement(p);
@@ -1084,9 +1215,9 @@ static ASTNode_t* parse_if(CDM_Parser_t* p) {
 }
 static ASTNode_t* parse_while(CDM_Parser_t* p) {
   match_kw(p, "while");
-  match_punct(p, "(");
+  require_punct(p, "(");
   ASTNode_t* cond = parse_expression(p);
-  match_punct(p, ")");
+  require_punct(p, ")");
   ASTNode_t* node = new_node(AST_WHILE);
   node->left = cond;
   node->body = parse_statement(p);
@@ -1098,19 +1229,19 @@ static ASTNode_t* parse_do_while(CDM_Parser_t* p) {
   ASTNode_t* node = new_node(AST_DO_WHILE);
   node->body = parse_statement(p);
   match_kw(p, "while");
-  match_punct(p, "(");
+  require_punct(p, "(");
   node->left = parse_expression(p);
-  match_punct(p, ")");
-  match_punct(p, ";");
+  require_punct(p, ")");
+  require_punct(p, ";");        // ★ do-while 后的 ; 是必需的
   return node;
 }
 
 static ASTNode_t* parse_switch(CDM_Parser_t* p) {
   match_kw(p, "switch");
-  match_punct(p, "(");
+  require_punct(p, "(");
   ASTNode_t* cond = parse_expression(p);
-  match_punct(p, ")");
-  match_punct(p, "{");
+  require_punct(p, ")");
+  require_punct(p, "{");
 
   ASTNode_t* node = new_node(AST_SWITCH);
   node->left = cond;
@@ -1123,7 +1254,7 @@ static ASTNode_t* parse_switch(CDM_Parser_t* p) {
       next_token(p);
       ASTNode_t* c = new_node(AST_CASE);
       c->left = parse_expression(p);
-      if (!match_op(p, ":")) match_punct(p, ":");
+      require_op(p, ":");
       while (p->cur.type != TOK_EOF) {
         if (p->cur.type == TOK_KEYWORD &&
             (strcmp(p->cur.text, "case") == 0 || strcmp(p->cur.text, "default") == 0))
@@ -1139,7 +1270,7 @@ static ASTNode_t* parse_switch(CDM_Parser_t* p) {
     }
     else if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "default") == 0) {
       next_token(p);
-      if (!match_op(p, ":")) match_punct(p, ":");
+      require_op(p, ":");
       ASTNode_t* d = new_node(AST_DEFAULT);
       while (p->cur.type != TOK_EOF) {
         if (p->cur.type == TOK_KEYWORD &&
@@ -1158,13 +1289,13 @@ static ASTNode_t* parse_switch(CDM_Parser_t* p) {
       next_token(p);
     }
   }
-  match_punct(p, "}");
+  require_punct(p, "}");
   return node;
 }
 
 static ASTNode_t* parse_for(CDM_Parser_t* p) {
   match_kw(p, "for");
-  match_punct(p, "(");
+  require_punct(p, "(");
   ASTNode_t* node = new_node(AST_FOR);
   scope_enter();
   if (p->cur.type == TOK_PUNCT && p->cur.text[0] == ';') next_token(p);
@@ -1193,7 +1324,7 @@ static ASTNode_t* parse_for(CDM_Parser_t* p) {
         if (p->cur.type == TOK_OP && strcmp(p->cur.text, ":") == 0) {
           next_token(p);
           ASTNode_t* arr = parse_expression(p);
-          match_punct(p, ")");
+          require_punct(p, ")");
           node->type = AST_RANGE_FOR;
           strncpy(node->name, varname, 63);
           node->decl_type = dt;
@@ -1215,21 +1346,22 @@ static ASTNode_t* parse_for(CDM_Parser_t* p) {
       stmt->left = e;
       node->init = stmt;
     }
-    match_punct(p, ";");
+    require_punct(p, ";");      // ★ for 里第一个 ;
   }
   if (!(p->cur.type == TOK_PUNCT && p->cur.text[0] == ';')) node->left = parse_expression(p);
-  match_punct(p, ";");
+  require_punct(p, ";");        // ★ for 里第二个 ;
   if (!(p->cur.type == TOK_PUNCT && p->cur.text[0] == ')')) node->update = parse_expression(p);
-  match_punct(p, ")");
+  require_punct(p, ")");
   node->body = parse_statement(p);
   return node;
 }
+
 static ASTNode_t* parse_return(CDM_Parser_t* p) {
   match_kw(p, "return");
   ASTNode_t* node = new_node(AST_RETURN);
   if (!(p->cur.type == TOK_PUNCT && p->cur.text[0] == ';'))
     node->left = parse_expression(p);
-  match_punct(p, ";");
+  require_punct(p, ";");        // ★ return 后的 ; 必需
   return node;
 }
 static ASTNode_t* parse_delete(CDM_Parser_t* p) {
@@ -1237,13 +1369,13 @@ static ASTNode_t* parse_delete(CDM_Parser_t* p) {
   ASTNode_t* node;
   if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '[') {
     next_token(p);
-    match_punct(p, "]");
+    require_punct(p, "]");
     node = new_node(AST_DELETE_ARRAY);
   } else {
     node = new_node(AST_DELETE);
   }
   node->left = parse_expression(p);
-  match_punct(p, ";");
+  require_punct(p, ";");        // ★ delete 后的 ; 必需
   return node;
 }
 static ASTNode_t* parse_block(CDM_Parser_t* p) {
@@ -1257,46 +1389,70 @@ static ASTNode_t* parse_block(CDM_Parser_t* p) {
     if (p->pos == old_pos) next_token(p);
     if (g_error_count >= CDM_MAX_ERRORS) break;
   }
-  match_punct(p, "}");
+  require_punct(p, "}");
   return block;
 }
 
 static ASTNode_t* parse_struct_def(CDM_Parser_t* p) {
   match_kw(p, "struct");
-  if (p->cur.type != TOK_IDENT) { report_error(p, "Expected struct name"); return NULL; }
   char sname[32];
-  strncpy(sname, p->cur.text, 31); sname[31] = '\0';
-  next_token(p);
-  if (find_struct_def(sname) >= 0) { report_error(p, "struct '%s' already defined", sname); return NULL; }
-  if (g_struct_def_count >= CDM_MAX_STRUCT_TYPES) { report_error(p, "too many structs"); return NULL; }
+  if (!require_identifier(p, sname, sizeof(sname))) return NULL;
+  if (find_struct_def(sname) >= 0) {
+    report_error(p, "struct '%s' already defined", sname);
+    g_panic_mode = 1;
+    return NULL;
+  }
+  if (g_struct_def_count >= CDM_MAX_STRUCT_TYPES) {
+    report_error(p, "too many structs (max %d)", CDM_MAX_STRUCT_TYPES);
+    g_panic_mode = 1;
+    return NULL;
+  }
   int sid = g_struct_def_count++;
   CDM_StructDef_t* sd = &g_struct_defs[sid];
   strncpy(sd->name, sname, 31); sd->name[31] = '\0';
   sd->field_count = 0;
-  if (!match_punct(p, "{")) { report_error(p, "Expected '{'"); return NULL; }
+  require_punct(p, "{");
   while (p->cur.type != TOK_EOF &&
          !(p->cur.type == TOK_PUNCT && p->cur.text[0] == '}')) {
-    if (sd->field_count >= CDM_MAX_FIELDS_PER_STRUCT) break;
-    if (!is_type_keyword(p)) { report_error(p, "Expected type"); next_token(p); continue; }
+    if (sd->field_count >= CDM_MAX_FIELDS_PER_STRUCT) {
+      report_error(p, "too many fields in struct (max %d)", CDM_MAX_FIELDS_PER_STRUCT);
+      g_panic_mode = 1;
+      break;
+    }
+    if (!is_type_keyword(p)) {
+      report_error(p, "expected type in struct, got '%s'", p->cur.text);
+      g_panic_mode = 1;
+      recover_statement(p);
+      continue;
+    }
     CDM_ValueType_t ft = type_from_keyword(p->cur.text);
     next_token(p);
     while (is_type_keyword(p)) next_token(p);
     while (p->cur.type == TOK_OP && strcmp(p->cur.text, "*") == 0) { ft = CDM_TYPE_PTR; next_token(p); }
-    if (p->cur.type != TOK_IDENT) { report_error(p, "Expected field name"); break; }
+    char fname[32];
+    if (!require_identifier(p, fname, sizeof(fname))) {
+      recover_statement(p);
+      break;
+    }
     CDM_FieldDef_t* f = &sd->fields[sd->field_count];
-    strncpy(f->name, p->cur.text, 31); f->name[31] = '\0';
+    strncpy(f->name, fname, 31); f->name[31] = '\0';
     f->type = ft; f->struct_id = -1; f->array_len = 0;
-    next_token(p);
     if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '[') {
       next_token(p);
-      if (p->cur.type == TOK_NUMBER) { f->array_len = atoi(p->cur.text); next_token(p); }
-      match_punct(p, "]");
+      if (p->cur.type == TOK_NUMBER) {
+        f->array_len = atoi(p->cur.text);
+        next_token(p);
+      } else {
+        report_error(p, "expected constant array size, got '%s'", p->cur.text);
+        g_panic_mode = 1;
+      }
+      require_punct(p, "]");
     }
     sd->field_count++;
-    match_punct(p, ";");
+    require_punct(p, ";");
   }
-  match_punct(p, "}");
-  match_punct(p, ";");
+  require_punct(p, "}");
+  require_punct(p, ";");
   ASTNode_t* node = new_node(AST_STRUCT_DEF);
   strncpy(node->name, sname, 63);
   node->struct_id = sid;
@@ -1308,22 +1464,16 @@ static ASTNode_t* parse_enum(CDM_Parser_t* p) {
   match_kw(p, "enum");
   if (p->cur.type == TOK_IDENT) next_token(p);
 
-  if (!match_punct(p, "{")) {
-    report_error(p, "Expected '{' in enum");
-    return NULL;
-  }
+  require_punct(p, "{");
 
   int64_t next_val = 0;
   while (p->cur.type != TOK_EOF &&
          !(p->cur.type == TOK_PUNCT && p->cur.text[0] == '}')) {
-    if (p->cur.type != TOK_IDENT) {
-      report_error(p, "Expected enum name, got '%s'", p->cur.text);
+    char name[64];
+    if (!require_identifier(p, name, sizeof(name))) {
+      recover_statement(p);
       break;
     }
-    char name[64];
-    strncpy(name, p->cur.text, 63);
-    name[63] = '\0';
-    next_token(p);
 
     if (match_op(p, "=")) {
       ASTNode_t* ve = parse_expression(p);
@@ -1336,13 +1486,16 @@ static ASTNode_t* parse_enum(CDM_Parser_t* p) {
       g_enums[g_enum_count].name[63] = '\0';
       g_enums[g_enum_count].value = next_val;
       g_enum_count++;
+    } else {
+      report_error(p, "too many enum entries");
+      g_panic_mode = 1;
     }
     next_val++;
 
     if (!match_punct(p, ",")) break;
   }
-  match_punct(p, "}");
-  match_punct(p, ";");
+  require_punct(p, "}");
+  require_punct(p, ";");
 
   return new_node(AST_ENUM_DECL);
 }
@@ -1371,13 +1524,8 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
   }
   if (is_ptr) dt = CDM_TYPE_PTR;
 
-  if (p->cur.type != TOK_IDENT) {
-    report_error(p, "Expected identifier, got '%s'", p->cur.text);
-    return NULL;
-  }
   char name[64];
-  strncpy(name, p->cur.text, 63); name[63] = '\0';
-  next_token(p);
+  if (!require_identifier(p, name, sizeof(name))) return NULL;
 
   if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '(') {
     ASTNode_t* func = new_node(AST_FUNC_DECL);
@@ -1413,11 +1561,15 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
           while (!(p->cur.type == TOK_PUNCT && p->cur.text[0] == ']')) next_token(p);
           next_token(p);
         }
-        params[argc++] = param;
+        if (argc < 32) params[argc++] = param;
+      } else {
+        report_error(p, "expected parameter name, got '%s'", p->cur.text);
+        g_panic_mode = 1;
+        break;
       }
       if (!match_punct(p, ",")) break;
     }
-    match_punct(p, ")");
+    require_punct(p, ")");
     if (argc > 0) {
       func->args = (ASTNode_t**)calloc(argc, sizeof(ASTNode_t*));
       for (int i = 0; i < argc; i++) func->args[i] = params[i];
@@ -1436,13 +1588,22 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
     arr->array_len = 1;
     while (p->cur.type == TOK_PUNCT && p->cur.text[0] == '[') {
       next_token(p);
-      if (p->cur.type != TOK_NUMBER) { report_error(p, "Array size must be constant"); break; }
+      if (p->cur.type != TOK_NUMBER) {
+        report_error(p, "array size must be constant, got '%s'", p->cur.text);
+        g_panic_mode = 1;
+        /* 尝试跳过 [ ... ] 恢复 */
+        while (p->cur.type != TOK_EOF &&
+               !(p->cur.type == TOK_PUNCT && p->cur.text[0] == ']'))
+          next_token(p);
+        match_punct(p, "]");
+        break;
+      }
       int sz = atoi(p->cur.text);
       if (arr->array_dim < 4) arr->array_sizes[arr->array_dim] = sz;
       arr->array_len *= sz;
       arr->array_dim++;
       next_token(p);
-      match_punct(p, "]");
+      require_punct(p, "]");
     }
     if (match_op(p, "=")) {
       if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '{') {
@@ -1456,16 +1617,17 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
             if (!match_punct(p, ",")) break;
           }
         }
-        match_punct(p, "}");
+        require_punct(p, "}");
         init_list->elems = (ASTNode_t**)calloc(n, sizeof(ASTNode_t*));
         for (int i = 0; i < n; i++) init_list->elems[i] = items[i];
         init_list->elem_count = n;
         arr->init = init_list;
       } else {
-        report_error(p, "Expected '{' for array init");
+        report_error(p, "expected '{' for array initializer, got '%s'", p->cur.text);
+        g_panic_mode = 1;
       }
     }
-    if (consume_semi) match_punct(p, ";");
+    if (consume_semi) require_punct(p, ";");   // ★
     return arr;
   }
 
@@ -1476,11 +1638,17 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
   v->decl_type = dt;
   v->struct_id = sid;
   if (match_op(p, "=")) v->left = parse_expression(p);
-  if (consume_semi) match_punct(p, ";");
+  if (consume_semi) require_punct(p, ";");     // ★
   return v;
 }
 
 static ASTNode_t* parse_statement(CDM_Parser_t* p) {
+
+  if (g_panic_mode) {
+    recover_statement(p);
+    return NULL;
+  }
+
   if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "struct") == 0) return parse_struct_def(p);
   if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "enum") == 0) return parse_enum(p);
   if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "return") == 0) return parse_return(p);
@@ -1495,15 +1663,22 @@ static ASTNode_t* parse_statement(CDM_Parser_t* p) {
       (strcmp(p->cur.text, "break") == 0 || strcmp(p->cur.text, "continue") == 0)) {
     ASTNode_t* n = new_node(strcmp(p->cur.text, "break") == 0 ? AST_BREAK : AST_CONTINUE);
     next_token(p);
-    match_punct(p, ";");
+    require_punct(p, ";");      // ★
     return n;
   }
 
   if (is_type_keyword(p) || (p->cur.type == TOK_IDENT && is_user_type(p->cur.text)))
     return parse_declaration(p, 1);
   if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '{') return parse_block(p);
+
+  /* 空语句 ; 直接跳过 */
+  if (p->cur.type == TOK_PUNCT && p->cur.text[0] == ';') {
+    next_token(p);
+    return NULL;
+  }
+
   ASTNode_t* e = parse_expression(p);
-  match_punct(p, ";");
+  require_punct(p, ";");        // ★ 表达式语句末尾
   ASTNode_t* stmt = new_node(AST_EXPR_STMT);
   stmt->left = e;
   return stmt;
@@ -1518,6 +1693,7 @@ ASTNode_t* CDM_Parse(const char* source) {
   g_struct_def_count = 0;
   g_enum_count = 0;
   g_parse_line = 1;
+  g_panic_mode = 0;
   CDM_Parser_t p;
   p.src = source;
   p.pos = 0;
@@ -1531,17 +1707,24 @@ ASTNode_t* CDM_Parse(const char* source) {
       printf("[Parse] tick=%d pos=%d/%d line=%d tok='%s'\n",
              tick, p.pos, p.len, p.line, p.cur.text);
     }
+    if (g_error_count >= CDM_MAX_ERRORS) break;
+
+    if (g_panic_mode) {
+      recover_statement(&p);
+      continue;
+    }
+
     int old_pos = p.pos;
     ASTNode_t* decl = parse_declaration(&p, 1);
     if (!decl) decl = parse_statement(&p);
     if (decl) add_child(program, decl);
     else if (p.pos == old_pos) {
-      report_error(&p, "Unexpected token '%s' at top level", p.cur.text);
+      report_error(&p, "unexpected token '%s' at top level", p.cur.text);
+      g_panic_mode = 1;
       next_token(&p);
     }
-    if (g_error_count >= CDM_MAX_ERRORS) break;
   }
-  printf("[Parse] done pos=%d\n", p.pos);
+  printf("[Parse] done pos=%d, %d error(s)\n", p.pos, g_error_count);
   return program;
 }
 
@@ -1870,7 +2053,7 @@ static CDM_Value_t eval_method_call(ASTNode_t* node) {
 
   CDM_HostFuncEx_t ex = find_host_ex(fname);
   if (!ex) {
-    report_error(NULL, "no method %s", fname);
+    report_error(NULL, "no method '%s'", fname);
     if (obj.owned) value_release(obj);
     return make_int(0);
   }
@@ -1918,7 +2101,10 @@ static CDM_Value_t eval_func_call(ASTNode_t* node) {
     node->cached_host_func = (void*)fn;
     node->cached_hf_tried = 1;
   }
-  if (!fn) return make_int(0);
+  if (!fn) {
+    report_error(NULL, "undefined function '%s'", node->name);
+    return make_int(0);
+  }
 
   const char* argv[32];
   char* heap_args[32];
@@ -2177,7 +2363,6 @@ static CDM_Value_t eval_primary(ASTNode_t* node) {
       return CDM_MakeString(node->name);
     case AST_IDENTIFIER:
       {
-        /* ★ 先查枚举表 */
         int ei = find_enum(node->name);
         if (ei >= 0) return make_int(g_enums[ei].value);
 
@@ -2186,7 +2371,6 @@ static CDM_Value_t eval_primary(ASTNode_t* node) {
           s = (Symbol_t*)node->cached_symbol;
         } else {
           s = find_symbol(node->name);
-          /* 不再自动 create，避免污染符号表 */
           node->cached_symbol = (void*)s;
           node->cached_sym_tried = 1;
         }
@@ -2288,7 +2472,6 @@ static CDM_Value_t eval_primary(ASTNode_t* node) {
 
     case AST_SIZEOF:
       {
-        /* 数组下标 → 元素大小 */
         if (node->left && node->left->type == AST_ARRAY_SUBSCRIPT) {
           CDM_Value_t arr; int idx;
           if (resolve_array_lvalue(node->left, &arr, &idx)) {
@@ -2298,12 +2481,10 @@ static CDM_Value_t eval_primary(ASTNode_t* node) {
             return make_int(es);
           }
         }
-        /* 标识符 → 查符号表 */
         if (node->left && node->left->type == AST_IDENTIFIER) {
           Symbol_t* s = find_symbol(node->left->name);
           if (s) return make_int(sizeof_value(s->value));
         }
-        /* 其他 → 求值后按类型算 */
         CDM_Value_t v = CDM_Deref(eval_primary(node->left));
         int64_t sz = sizeof_value(v);
         if (v.owned) value_release(v);
