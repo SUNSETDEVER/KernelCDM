@@ -674,6 +674,17 @@ static void next_token(CDM_Parser_t* p) {
           p->cur.text[j++] = p->src[p->pos++];
       }
     }
+
+    while (p->pos < p->len) {
+      char sfx = p->src[p->pos];
+      if (sfx == 'f' || sfx == 'F' || sfx == 'l' || sfx == 'L' ||
+          sfx == 'u' || sfx == 'U') {
+        p->pos++;
+        continue;
+      }
+      break;
+    }
+
     p->cur.text[j] = '\0';
     p->cur.type = TOK_NUMBER;
     return;
