@@ -69,7 +69,7 @@ void loop() {}
 
 On ESP32-S3 @ 240MHz:
 
-- ~15,000 simple loop iterations / second
+- ~45,000 simple loop iterations / second
 - Boot-to-first-script: < 100ms
 - Preprocessing + parsing a 100-line script: < 5ms
 
