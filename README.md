@@ -23,6 +23,7 @@ at runtime - change behavior without reflashing the firmware.
 - [Supported Platforms](#supported-platforms)
 - [Contributing](#contributing)
 - [License](#license)
+- [Stack Requirements](#stack-requirements)
 
 ---
 
@@ -625,6 +626,124 @@ simplicity and small code size are more important than raw speed for the
 target use case (scripts that run a few times per second).
 
 ---
+
+## Stack Requirements
+
+CMScript parses scripts recursively and evaluates the AST recursively.
+Deeply nested expressions (long `<<` chains, nested `if`, function calls)
+consume task stack proportionally. On top of that, the parser, the
+preprocessor, and `CDM_FreeAST` are all recursive.
+
+### Minimum stack sizes
+
+| Board              | Minimum stack | Recommended |
+|--------------------|---------------|-------------|
+| ESP32 / ESP32-S3   | 32 KB         | 48 KB       |
+| ESP8266            | n/a (single)  | 8 KB        |
+| RP2040             | 16 KB         | 32 KB       |
+| SAMD51             | 16 KB         | 32 KB       |
+
+On ESP32, the Arduino core creates a `loopTask` with **only 8 KB** of
+stack. Calling `CDM_Execute()` directly from `setup()` or `loop()` will
+**crash with a stack overflow** as soon as the script is non-trivial.
+
+### Correct pattern: run in a dedicated FreeRTOS task
+
+```cpp
+    #include <Arduino.h>
+    #include <CMScript.h>
+
+    #define INTERP_STACK_WORDS  12288   // 12288 words = 48 KB
+    #define INTERP_PRIORITY     1
+    #define INTERP_CORE         1
+
+    static const char* src =
+        "int main() {\n"
+        "    std::cout << \"hello\\n\";\n"
+        "    return 0;\n"
+        "}\n";
+
+    static int serial_print(int argc, const char** argv) {
+        if (argc >= 1) printf("%s", argv[0]);
+        return 0;
+    }
+
+    static void interpreterTask(void* pv) {
+        CMScript_Init();
+        CDM_RegisterHostFunc("__print_str",   serial_print);
+        CDM_RegisterHostFunc("__print_int",   serial_print);
+        CDM_RegisterHostFunc("__print_float", serial_print);
+
+        char* pre = CDM_Preprocess(src);
+        ASTNode_t* root = CDM_Parse(pre);
+        free(pre);
+
+        if (root && CDM_GetErrorCount() == 0) {
+            CDM_Execute(root);
+        }
+        if (root) CDM_FreeAST(root);
+
+        // Optional: print remaining stack to tune the size
+        UBaseType_t remain = uxTaskGetStackHighWaterMark(NULL);
+        printf("stack high-water: %u words (%u bytes)\n",
+               (unsigned)remain,
+               (unsigned)(remain * sizeof(StackType_t)));
+
+        vTaskDelete(NULL);
+    }
+
+    void setup() {
+        Serial.begin(115200);
+        delay(1000);
+
+        xTaskCreatePinnedToCore(
+            interpreterTask,
+            "Interp",
+            INTERP_STACK_WORDS,   // NOTE: unit is WORDS on ESP32 (1 word = 4 bytes)
+            NULL,
+            INTERP_PRIORITY,
+            NULL,
+            INTERP_CORE
+        );
+    }
+
+    void loop() {
+        delay(1000);
+    }
+```
+
+### Why not just call CDM_Execute directly?
+
+FreeRTOS checks for stack overflow by comparing a canary value at the
+bottom of the task stack. If you exceed the stack, the canary is
+overwritten and the error is only detected at the **next context
+switch**. This means:
+
+- The script may finish and print its output
+- Then the crash appears later, in an unrelated place
+- The error message points at `loopTask`, not at your script
+
+So even if `CDM_Execute()` seems to "work", you may still be corrupting
+memory silently. Always use a dedicated task.
+
+### Tuning the stack size
+
+After your script runs, check the high-water mark printed by
+`uxTaskGetStackHighWaterMark(NULL)`:
+
+- Remaining > 8000 words (32 KB)  -> you can shrink to 8192 words (32 KB)
+- Remaining 2000..8000 words      -> keep current size
+- Remaining < 2000 words (8 KB)   -> double the stack size
+- Task crashes / prints garbage   -> increase by 8192 words and retry
+
+### ESP32 stack unit gotcha
+
+`xTaskCreatePinnedToCore()` takes the stack size in **words**, not bytes,
+on ESP32. One word = 4 bytes. So:
+
+    xTaskCreatePinnedToCore(..., 12288, ...);   // 12288 words = 48 KB
+
+Not 12288 bytes. This is a common source of confusion.
 
 ## Limitations
 
