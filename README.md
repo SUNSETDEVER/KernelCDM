@@ -358,6 +358,7 @@ To stop on first runtime error, call CDM_GetErrorCount after CDM_Execute.
 
 ### Operators
 
+```
 Arithmetic:     + - * / %
 Comparison:     == != < > <= >=
 Logical:        && || !
@@ -367,10 +368,11 @@ Increment:      ++ --
 Ternary:        cond ? a : b
 Cast:           (int)x, (float)y
 Sizeof:         sizeof(int), sizeof(arr), sizeof(arr[0])
+```
 
 ### String methods
 
-```cpp
+```
     std::string s = "hello world";
 
     s.length()              -> 11
@@ -391,13 +393,17 @@ Sizeof:         sizeof(int), sizeof(arr), sizeof(arr[0])
 
 ### Math
 
+```
 sqrt, sin, cos, tan, asin, acos, atan, atan2,
 floor, ceil, round, fabs, fmod, pow, exp,
 log, log10, log2, abs, min, max, rand, srand
+```
 
 ### String
 
+```
 strlen, strcmp, strcpy, strcat, strncpy, strncmp, strchr
+```
 
 ### Formatting
 
@@ -409,6 +415,7 @@ strlen, strcmp, strcpy, strcat, strncpy, strncmp, strchr
 
 Supported format specifiers:
 
+```
     %d %i    signed integer
     %u       unsigned integer
     %x %X    hexadecimal
@@ -418,6 +425,7 @@ Supported format specifiers:
     %c       character
     %p       pointer
     %%       literal percent
+```
 
 Note: width and precision (.2f, %5d) are currently ignored.
 
@@ -448,13 +456,18 @@ Note: width and precision (.2f, %5d) are currently ignored.
 Supported modes: "r", "w", "a", "rb", "wb", "ab", "r+", "w+", "a+"
 
 Note: on ESP32, the path must include the mount point prefix:
+
+```
   /littlefs/foo.txt  (for LittleFS)
   /spiffs/foo.txt    (for SPIFFS)
   /sd/foo.txt        (for SD card)
+```
 
 ### Number conversion
 
+```
 atoi, atof, to_string
+```
 
 ---
 
@@ -599,7 +612,7 @@ Use HostFuncFloat to mark the return value as float.
 
 Measured on ESP32-S3 @ 240MHz, 240KB free heap:
 
-    Simple loop (int increment):     ~15,000 iterations / second
+    Simple loop (int increment):     ~45,000 iterations / second
     Boot to first script:            under 100 ms
     Preprocess + parse 100-line:     under 5 ms
     Memory (steady state):           about 65 KB heap
