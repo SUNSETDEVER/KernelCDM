@@ -110,6 +110,9 @@ First public release.
 
 - `Added` for new features
 - `Changed` for changes in existing functionality
+
+## [1.0.2] - 2026-10-18
+
 - `Deprecated` for soon-to-be removed features
 - `Removed` for now removed features
 - `Fixed` for any bug fixes
