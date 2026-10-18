@@ -7,6 +7,18 @@
 #include <stdint.h>
 #include <time.h>
 
+#if defined(ESP32)
+  #include "esp_heap_caps.h"
+  #undef malloc
+  #undef calloc
+  #undef realloc
+  #undef free
+  #define malloc(size)       heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+  #define calloc(n, size)    heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+  #define realloc(ptr, size) heap_caps_realloc(ptr, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+  #define free(ptr)          heap_caps_free(ptr)
+#endif
+
 static int64_t cdm_atoll(const char* s) {
   if (!s) return 0;
   int64_t r = 0;
@@ -50,11 +62,97 @@ static int64_t cdm_strtoll(const char* s, int base) {
 }
 
 #define CDM_MAX_HOST_FUNCS 128
-#define CDM_MAX_HOST_EX 64
+#define CDM_MAX_HOST_EX 512
 #define MAX_SYMBOLS 256
 #define MAX_SCOPE_DEPTH 32
 #define MAX_USER_FUNCS 64
 #define CDM_ARR_MAGIC 0xDEADBEEF
+
+#define CDM_DEFAULT_STACK_DEPTH 512
+
+typedef struct {
+    CDM_Value_t* slot;
+    uint32_t     depth;
+    uint32_t     top;
+} CDM_ValueStack_t;
+
+static CDM_ValueStack_t g_vstack = { NULL, 0, 0 };
+
+static uint32_t g_recu_depth     = 0;
+static uint32_t g_recu_max_depth = 32;
+static uint32_t g_recu_peak      = 0;
+static uint32_t g_vstack_peak    = 0;
+static int      g_recu_explicit  = 0;
+
+void CDM_ConfigStack(uint32_t depth) {
+    if (g_vstack.slot) {
+        free(g_vstack.slot);
+        g_vstack.slot = NULL;
+        g_vstack.depth = 0;
+        g_vstack.top = 0;
+    }
+    if (depth == 0) return;
+#if defined(ESP32) && defined(BOARD_HAS_PSRAM)
+    g_vstack.slot = (CDM_Value_t*)heap_caps_calloc(
+        depth, sizeof(CDM_Value_t),
+        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#endif
+    if (!g_vstack.slot) {
+        g_vstack.slot = (CDM_Value_t*)calloc(depth, sizeof(CDM_Value_t));
+    }
+    if (g_vstack.slot) {
+        g_vstack.depth = depth;
+        g_vstack.top = 0;
+        if (!g_recu_explicit) {
+            uint32_t implied = depth / 64;
+            if (implied >= 4 && implied < g_recu_max_depth) {
+                g_recu_max_depth = implied;
+            }
+        }
+    }
+}
+
+void CDM_SetRecuStackDepth(uint32_t depth) {
+    if (depth == 0) depth = 1;
+    if (depth > 256) depth = 256;
+    g_recu_max_depth = depth;
+    g_recu_explicit = 1;
+}
+
+uint32_t CDM_GetRecuStackUsed(void)  { return g_recu_depth; }
+uint32_t CDM_GetRecuStackMax(void)   { return g_recu_max_depth; }
+uint32_t CDM_GetRecuStackPeak(void)  { return g_recu_peak; }
+uint32_t CDM_GetVStackUsed(void)     { return g_vstack.top; }
+uint32_t CDM_GetVStackDepth(void)    { return g_vstack.depth; }
+uint32_t CDM_GetVStackPeak(void)     { return g_vstack_peak; }
+
+void CDM_DumpConfig(void) {
+    printf("[CDM config]\n");
+    printf("  vstack depth = %u slots (%u bytes)\n",
+           (unsigned)g_vstack.depth,
+           (unsigned)(g_vstack.depth * sizeof(CDM_Value_t)));
+    printf("  recu max     = %u (explicit=%d)\n",
+           (unsigned)g_recu_max_depth, g_recu_explicit);
+}
+
+static CDM_Value_t* stack_alloc(uint32_t n) {
+    if (!g_vstack.slot) {
+        CDM_ConfigStack(CDM_DEFAULT_STACK_DEPTH);
+        if (!g_vstack.slot) return NULL;
+    }
+    if (g_vstack.top + n > g_vstack.depth) {
+        return NULL;
+    }
+    CDM_Value_t* p = &g_vstack.slot[g_vstack.top];
+    g_vstack.top += n;
+    if (g_vstack.top > g_vstack_peak) g_vstack_peak = g_vstack.top;
+    return p;
+}
+
+static void stack_free(uint32_t n) {
+    if (n > g_vstack.top) n = g_vstack.top;
+    g_vstack.top -= n;
+}
 
 typedef struct {
   char name[64];
@@ -96,6 +194,7 @@ static int g_parse_line = 1;
 static int g_current_line = 0;
 
 static int g_panic_mode = 0;
+static int g_abort_execute = 0;
 
 #define MAX_ENUM_ENTRIES 128
 typedef struct {
@@ -129,7 +228,10 @@ static const char* float_func_at(int i) { return g_float_funcs + i * 64; }
 
 void CDM_RegisterHostFunc(const char* name, CDM_HostFunc_t fn) {
   if (!cdm_ensure_alloc()) return;
-  if (g_host_func_count >= CDM_MAX_HOST_FUNCS) return;
+  if (g_host_func_count >= CDM_MAX_HOST_FUNCS) {
+    printf("[CDM] host func table full, dropped: %s\n", name);
+    return;
+  }
   strncpy(g_host_funcs[g_host_func_count].name, name, 63);
   g_host_funcs[g_host_func_count].name[63] = '\0';
   g_host_funcs[g_host_func_count].func = fn;
@@ -150,7 +252,10 @@ void CDM_RegisterHostFuncFloat(const char* name, CDM_HostFunc_t fn) {
 }
 void CDM_RegisterHostFuncEx(const char* name, CDM_HostFuncEx_t fn) {
   if (!cdm_ensure_alloc()) return;
-  if (g_host_ex_count >= CDM_MAX_HOST_EX) return;
+  if (g_host_ex_count >= CDM_MAX_HOST_EX) {
+    printf("[CDM] host ex func table full, dropped: %s\n", name);
+    return;
+  }
   strncpy(g_host_ex[g_host_ex_count].name, name, 63);
   g_host_ex[g_host_ex_count].name[63] = '\0';
   g_host_ex[g_host_ex_count].func = fn;
@@ -215,6 +320,21 @@ static void report_error(CDM_Parser_t* p, const char* fmt, ...) {
   va_start(ap, fmt);
   vsnprintf(e->message, sizeof(e->message), fmt, ap);
   va_end(ap);
+
+  char line_buf[128];
+  snprintf(line_buf, sizeof(line_buf),
+           "[error] line %d: %s\n", e->line, e->message);
+  printf("%s", line_buf);
+
+  CDM_HostFunc_t fn = find_host_func("__print_str");
+  if (fn) {
+    const char* args[1] = { line_buf };
+    fn(1, args);
+  }
+
+  if (p == NULL) {
+    g_abort_execute = 1;
+  }
 }
 
 static int64_t sizeof_value(CDM_Value_t v) {
@@ -513,10 +633,8 @@ static ASTNode_t* find_user_func(const char* name) {
 
 static void clear_ast_cache(ASTNode_t* node) {
   if (!node) return;
-  node->cached_symbol = NULL;
   node->cached_host_func = NULL;
   node->cached_host_ex = NULL;
-  node->cached_sym_tried = 0;
   node->cached_hf_tried = 0;
   node->cached_he_tried = 0;
   ASTNode_t* c = node->first_child;
@@ -536,7 +654,7 @@ static const char* KEYWORDS[] = {
   "int", "char", "void", "float", "double", "return",
   "if", "else", "while", "for", "break", "continue",
   "switch", "case", "default", "do",
-  "enum", "sizeof",
+  "enum", "sizeof", "string",
   "const", "static", "long", "short", "unsigned", "signed",
   "struct", "class", "true", "false", "nullptr",
   "new", "delete", "auto",
@@ -806,6 +924,7 @@ static int is_type_keyword(CDM_Parser_t* p) {
   if (p->cur.type != TOK_KEYWORD) return 0;
   const char* t = p->cur.text;
   if (strcmp(t, "auto") == 0) return 1;
+  if (strcmp(t, "string") == 0) return 1;
   return (strcmp(t, "int") == 0 || strcmp(t, "char") == 0 || strcmp(t, "void") == 0 ||
           strcmp(t, "float") == 0 || strcmp(t, "double") == 0 || strcmp(t, "long") == 0 ||
           strcmp(t, "short") == 0 || strcmp(t, "unsigned") == 0 || strcmp(t, "signed") == 0 ||
@@ -813,9 +932,25 @@ static int is_type_keyword(CDM_Parser_t* p) {
           strncmp(t, "int", 3) == 0 || strncmp(t, "uint", 4) == 0 ||
           strncmp(t, "size_t", 6) == 0 || strncmp(t, "ssize_t", 7) == 0);
 }
+
 static CDM_ValueType_t type_from_keyword(const char* kw) {
+  if (strcmp(kw, "string") == 0) return CDM_TYPE_STRING;
   if (strstr(kw, "float") || strstr(kw, "double")) return CDM_TYPE_FLOAT;
   return CDM_TYPE_INT;
+}
+
+static int peek_std_string(CDM_Parser_t* p) {
+  if (p->cur.type != TOK_IDENT) return 0;
+  if (strcmp(p->cur.text, "std") != 0) return 0;
+  const char* s = p->src + p->pos;
+  while (*s == ' ' || *s == '\t') s++;
+  if (s[0] != ':' || s[1] != ':') return 0;
+  s += 2;
+  while (*s == ' ' || *s == '\t') s++;
+  if (strncmp(s, "string", 6) != 0) return 0;
+  char next = s[6];
+  if (isalnum((unsigned char)next) || next == '_') return 0;
+  return 1;
 }
 
 static ASTNode_t* parse_args(CDM_Parser_t* p) {
@@ -1240,6 +1375,9 @@ static ASTNode_t* parse_for(CDM_Parser_t* p) {
       int sid = -1, is_auto = 0;
       if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "auto") == 0) {
         is_auto = 1; next_token(p);
+      } else if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "string") == 0) {
+        dt = CDM_TYPE_STRING;
+        next_token(p);
       } else if (is_type_keyword(p)) {
         dt = type_from_keyword(p->cur.text);
         next_token(p);
@@ -1434,12 +1572,22 @@ static ASTNode_t* parse_enum(CDM_Parser_t* p) {
 }
 
 static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
-  if (!is_type_keyword(p) && !(p->cur.type == TOK_IDENT && is_user_type(p->cur.text))) return NULL;
+  if (!is_type_keyword(p) &&
+      !(p->cur.type == TOK_IDENT && is_user_type(p->cur.text)) &&
+      !peek_std_string(p)) return NULL;
 
   CDM_ValueType_t dt = CDM_TYPE_INT;
   int sid = -1, is_auto = 0;
-  if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "auto") == 0) {
+  if (peek_std_string(p)) {
+    next_token(p);
+    next_token(p);
+    next_token(p);
+    dt = CDM_TYPE_STRING;
+  } else if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "auto") == 0) {
     is_auto = 1; next_token(p);
+  } else if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "string") == 0) {
+    dt = CDM_TYPE_STRING;
+    next_token(p);
   } else if (is_type_keyword(p)) {
     dt = type_from_keyword(p->cur.text);
     next_token(p);
@@ -1471,7 +1619,10 @@ static ASTNode_t* parse_declaration(CDM_Parser_t* p, int consume_semi) {
     while (!(p->cur.type == TOK_PUNCT && p->cur.text[0] == ')')) {
       CDM_ValueType_t pt = CDM_TYPE_INT;
       int psid = -1;
-      if (is_type_keyword(p)) {
+      if (p->cur.type == TOK_KEYWORD && strcmp(p->cur.text, "string") == 0) {
+        pt = CDM_TYPE_STRING;
+        next_token(p);
+      } else if (is_type_keyword(p)) {
         pt = type_from_keyword(p->cur.text);
         next_token(p);
         while (is_type_keyword(p)) next_token(p);
@@ -1598,7 +1749,9 @@ static ASTNode_t* parse_statement(CDM_Parser_t* p) {
     return n;
   }
 
-  if (is_type_keyword(p) || (p->cur.type == TOK_IDENT && is_user_type(p->cur.text)))
+  if (is_type_keyword(p) ||
+      (p->cur.type == TOK_IDENT && is_user_type(p->cur.text)) ||
+      peek_std_string(p))
     return parse_declaration(p, 1);
   if (p->cur.type == TOK_PUNCT && p->cur.text[0] == '{') return parse_block(p);
 
@@ -1652,6 +1805,7 @@ ASTNode_t* CDM_Parse(const char* source) {
     }
   }
   printf("[Parse] done pos=%d, %d error(s)\n", p.pos, g_error_count);
+  g_vstack.top = 0;
   return program;
 }
 
@@ -1920,6 +2074,14 @@ static CDM_Value_t write_lvalue(ASTNode_t* node, CDM_Value_t r) {
 }
 
 static CDM_Value_t call_user_func(ASTNode_t* func, ASTNode_t* call) {
+  if (g_recu_depth >= g_recu_max_depth) {
+    report_error(NULL, "recursion depth limit reached (%u)",
+                 (unsigned)g_recu_max_depth);
+    return make_int(0);
+  }
+  g_recu_depth++;
+  if (g_recu_depth > g_recu_peak) g_recu_peak = g_recu_depth;
+
   int saved_returning = g_returning;
   CDM_Value_t saved_rv = g_return_value;
   g_returning = 0;
@@ -1928,8 +2090,7 @@ static CDM_Value_t call_user_func(ASTNode_t* func, ASTNode_t* call) {
   int n = func->arg_count < call->arg_count ? func->arg_count : call->arg_count;
   for (int i = 0; i < n; i++) {
     CDM_Value_t v = CDM_Deref(eval_primary(call->args[i]));
-    Symbol_t* s = find_symbol(func->args[i]->name);
-    if (!s) s = create_symbol(func->args[i]->name);
+    Symbol_t* s = create_symbol(func->args[i]->name);
     if (s) { value_release(s->value); s->value = v; }
   }
   if (func->body) exec_statement(func->body);
@@ -1937,6 +2098,7 @@ static CDM_Value_t call_user_func(ASTNode_t* func, ASTNode_t* call) {
   scope_exit();
   g_returning = saved_returning;
   g_return_value = saved_rv;
+  g_recu_depth--;
   return result;
 }
 
@@ -1975,7 +2137,13 @@ static CDM_Value_t eval_method_call(ASTNode_t* node) {
     if (obj.owned) value_release(obj);
     return make_int(0);
   }
-  CDM_Value_t args[32];
+
+  CDM_Value_t* args = stack_alloc(32);
+  if (!args) {
+    report_error(NULL, "value stack overflow in method call");
+    if (obj.owned) value_release(obj);
+    return make_int(0);
+  }
   args[0] = obj;
   int n = node->arg_count < 31 ? node->arg_count : 31;
   for (int i = 0; i < n; i++) args[i + 1] = CDM_Deref(eval_primary(node->args[i]));
@@ -1986,6 +2154,7 @@ static CDM_Value_t eval_method_call(ASTNode_t* node) {
   for (int i = 0; i < n; i++)
     if (args[i + 1].owned) value_release(args[i + 1]);
 
+  stack_free(32);
   return result;
 }
 
@@ -2002,12 +2171,17 @@ static CDM_Value_t eval_func_call(ASTNode_t* node) {
     node->cached_he_tried = 1;
   }
   if (ex) {
-    CDM_Value_t args[32];
+    CDM_Value_t* args = stack_alloc(32);
+    if (!args) {
+      report_error(NULL, "value stack overflow in host call");
+      return make_int(0);
+    }
     int n = 0;
     build_host_args(node, args, &n);
     CDM_Value_t result = ex(n, args);
     for (int i = 0; i < n; i++)
       if (!CDM_IsRef(args[i]) && args[i].owned) value_release(args[i]);
+    stack_free(32);
     return result;
   }
 
@@ -2261,6 +2435,7 @@ static CDM_Value_t eval_binary(ASTNode_t* node) {
 
 static CDM_Value_t eval_primary(ASTNode_t* node) {
   if (!node) return make_int(0);
+  if (g_abort_execute) return make_int(0);
   if (node->line) g_current_line = node->line;
 
   switch (node->type) {
@@ -2275,14 +2450,7 @@ static CDM_Value_t eval_primary(ASTNode_t* node) {
         int ei = find_enum(node->name);
         if (ei >= 0) return make_int(g_enums[ei].value);
 
-        Symbol_t* s;
-        if (node->cached_sym_tried) {
-          s = (Symbol_t*)node->cached_symbol;
-        } else {
-          s = find_symbol(node->name);
-          node->cached_symbol = (void*)s;
-          node->cached_sym_tried = 1;
-        }
+        Symbol_t* s = find_symbol(node->name);
         if (!s) return make_int(0);
         CDM_Value_t v = s->value;
         v.owned = 0;
@@ -2423,7 +2591,7 @@ static CDM_Value_t eval_primary(ASTNode_t* node) {
 }
 
 static int exec_statement(ASTNode_t* node) {
-  if (!node || g_returning || g_break_flag || g_continue_flag) return 0;
+  if (!node || g_returning || g_break_flag || g_continue_flag || g_abort_execute) return 0;
   if (node->line) g_current_line = node->line;
 
   switch (node->type) {
@@ -2431,7 +2599,7 @@ static int exec_statement(ASTNode_t* node) {
       {
         scope_enter();
         ASTNode_t* c = node->first_child;
-        while (c && !g_returning && !g_break_flag && !g_continue_flag) {
+        while (c && !g_returning && !g_break_flag && !g_continue_flag && !g_abort_execute) {
           exec_statement(c);
           c = c->next_sibling;
         }
@@ -2448,15 +2616,7 @@ static int exec_statement(ASTNode_t* node) {
 
     case AST_VAR_DECL:
       {
-        Symbol_t* s;
-        if (node->cached_sym_tried) {
-          s = (Symbol_t*)node->cached_symbol;
-        } else {
-          s = find_symbol(node->name);
-          if (!s) s = create_symbol(node->name);
-          node->cached_symbol = (void*)s;
-          node->cached_sym_tried = 1;
-        }
+        Symbol_t* s = create_symbol(node->name);
         if (!s) return 0;
 
         if (node->decl_type == CDM_TYPE_STRUCT && node->struct_id >= 0 && !node->is_auto) {
@@ -2507,15 +2667,7 @@ static int exec_statement(ASTNode_t* node) {
       }
     case AST_ARRAY_DECL:
       {
-        Symbol_t* s;
-        if (node->cached_sym_tried) {
-          s = (Symbol_t*)node->cached_symbol;
-        } else {
-          s = find_symbol(node->name);
-          if (!s) s = create_symbol(node->name);
-          node->cached_symbol = (void*)s;
-          node->cached_sym_tried = 1;
-        }
+        Symbol_t* s = create_symbol(node->name);
         if (!s) return 0;
         int n = node->array_len > 0 ? node->array_len : 1;
         CDM_Value_t* block = (CDM_Value_t*)calloc(n, sizeof(CDM_Value_t));
@@ -2572,7 +2724,7 @@ static int exec_statement(ASTNode_t* node) {
     case AST_WHILE:
       {
         long long guard = 0;
-        while (!g_returning) {
+        while (!g_returning && !g_abort_execute) {
           CDM_Value_t c = CDM_Deref(eval_primary(node->left));
           int v = val_to_int_raw(c);
           if (c.owned) value_release(c);
@@ -2589,7 +2741,7 @@ static int exec_statement(ASTNode_t* node) {
       {
         long long guard = 0;
         int cond = 1;
-        while (!g_returning && cond) {
+        while (!g_returning && cond && !g_abort_execute) {
           g_continue_flag = 0;
           exec_statement(node->body);
           if (g_break_flag) { g_break_flag = 0; break; }
@@ -2606,7 +2758,7 @@ static int exec_statement(ASTNode_t* node) {
         scope_enter();
         if (node->init) exec_statement(node->init);
         long long guard = 0;
-        while (!g_returning) {
+        while (!g_returning && !g_abort_execute) {
           if (node->left) {
             CDM_Value_t c = CDM_Deref(eval_primary(node->left));
             int v = val_to_int_raw(c);
@@ -2635,7 +2787,7 @@ static int exec_statement(ASTNode_t* node) {
         if (!s) s = create_symbol(node->name);
         if (!s) { scope_exit(); return 0; }
         long long guard = 0;
-        for (int i = 0; i < arr.array_len; i++) {
+        for (int i = 0; i < arr.array_len && !g_abort_execute; i++) {
           if (g_returning || g_break_flag) break;
           g_continue_flag = 0;
           value_release(s->value);
@@ -2675,9 +2827,9 @@ static int exec_statement(ASTNode_t* node) {
         if (!start) start = default_case;
         if (!start) return 0;
 
-        while (start && !g_returning && !g_break_flag) {
+        while (start && !g_returning && !g_break_flag && !g_abort_execute) {
           ASTNode_t* s = start->first_child;
-          while (s && !g_returning && !g_break_flag) {
+          while (s && !g_returning && !g_break_flag && !g_abort_execute) {
             exec_statement(s);
             s = s->next_sibling;
           }
@@ -2690,7 +2842,7 @@ static int exec_statement(ASTNode_t* node) {
     case AST_DEFAULT:
       {
         ASTNode_t* s = node->first_child;
-        while (s && !g_returning && !g_break_flag) {
+        while (s && !g_returning && !g_break_flag && !g_abort_execute) {
           exec_statement(s);
           s = s->next_sibling;
         }
@@ -2731,6 +2883,10 @@ int CDM_Execute(ASTNode_t* root) {
 
   clear_ast_cache(root);
   g_current_line = 0;
+  g_recu_depth = 0;
+  g_recu_peak = 0;
+  g_vstack_peak = 0;
+  g_abort_execute = 0;
 
   g_symbol_count = 0;
   g_scope_depth = 0;
@@ -2742,7 +2898,7 @@ int CDM_Execute(ASTNode_t* root) {
 
   int ret = 0;
   ASTNode_t* c = root->first_child;
-  while (c) {
+  while (c && !g_abort_execute) {
     if (c->type == AST_FUNC_DECL && strcmp(c->name, "main") == 0) {
       exec_statement(c->body);
       ret = (int)val_to_int_raw(g_return_value);
@@ -2753,7 +2909,20 @@ int CDM_Execute(ASTNode_t* root) {
 
   clock_t t_end = clock();
   double elapsed = (double)(t_end - t_start) / (double)CLOCKS_PER_SEC;
-  printf("exit after %.3fs returned %d\n", elapsed, ret);
 
-  return ret;
+  char line_buf[160];
+  snprintf(line_buf, sizeof(line_buf),
+           "exit after %.3fs returned %d%s\n",
+           elapsed, ret,
+           g_abort_execute ? " (aborted by error)" : "");
+
+  printf("%s", line_buf);
+
+  CDM_HostFunc_t fn = find_host_func("__print_str");
+  if (fn) {
+    const char* args[1] = { line_buf };
+    fn(1, args);
+  }
+
+  return g_abort_execute ? -3 : ret;
 }

@@ -62,7 +62,7 @@ typedef enum {
     AST_PROGRAM = 0,
     AST_FUNC_DECL, AST_PARAM,
     AST_VAR_DECL, AST_ARRAY_DECL, AST_STRUCT_DEF,
-    AST_ENUM_DECL,                     /* ★ 新增 */
+    AST_ENUM_DECL,
     AST_BLOCK, AST_RETURN, AST_EXPR_STMT,
     AST_IF, AST_WHILE, AST_FOR, AST_RANGE_FOR,
     AST_DO_WHILE,
@@ -70,8 +70,8 @@ typedef enum {
     AST_BREAK, AST_CONTINUE,
     AST_TERNARY,
     AST_BINARY, AST_UNARY, AST_ASSIGN,
-    AST_CAST,                          /* ★ 新增 */
-    AST_SIZEOF,                        /* ★ 新增 */
+    AST_CAST,
+    AST_SIZEOF,
     AST_FUNC_CALL, AST_METHOD_CALL,
     AST_IDENTIFIER,
     AST_NUMBER, AST_STRING, AST_MEMBER,
@@ -94,10 +94,8 @@ typedef struct ASTNode {
     int             array_len;
     int             array_sizes[4];
 
-    void*  cached_symbol;
     void*  cached_host_func;
     void*  cached_host_ex;
-    int    cached_sym_tried;
     int    cached_hf_tried;
     int    cached_he_tried;
 
@@ -130,6 +128,17 @@ ASTNode_t* CDM_Parse(const char* source);
 void       CDM_FreeAST(ASTNode_t* root);
 void       CDM_PrintAST(ASTNode_t* node, int indent);
 int        CDM_Execute(ASTNode_t* root);
+
+void       CDM_ConfigStack(uint32_t depth);
+void       CDM_SetRecuStackDepth(uint32_t depth);
+void       CDM_DumpConfig(void);
+
+uint32_t   CDM_GetRecuStackUsed(void);
+uint32_t   CDM_GetRecuStackMax(void);
+uint32_t   CDM_GetRecuStackPeak(void);
+uint32_t   CDM_GetVStackUsed(void);
+uint32_t   CDM_GetVStackDepth(void);
+uint32_t   CDM_GetVStackPeak(void);
 
 typedef int (*CDM_HostFunc_t)(int argc, const char** argv);
 void CDM_RegisterHostFunc(const char* name, CDM_HostFunc_t fn);

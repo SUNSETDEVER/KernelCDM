@@ -13,4 +13,4 @@ extern "C" {
 }
 #endif
 
-#endif  // CDM_ARDUINO_BRIDGE_H
+#endif

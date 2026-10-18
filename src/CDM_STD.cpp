@@ -6,9 +6,6 @@
 #include <stdint.h>
 #include <ctype.h>
 
-// ============================================================
-//  工具
-// ============================================================
 static double as_double(CDM_Value_t v) {
     v = CDM_Deref(v);
     if (v.type == CDM_TYPE_FLOAT) return v.v.f;
@@ -50,9 +47,32 @@ static CDM_Value_t mk_i(int64_t x) {
     return v;
 }
 
-// ============================================================
-//  数学
-// ============================================================
+static int assign_string_slot(CDM_Value_t ref, char* owned_result) {
+    if (!owned_result) return 0;
+    if (!CDM_IsRef(ref)) return 0;
+    CDM_Value_t* slot = CDM_RefPtr(ref);
+    if (!slot) return 0;
+
+    if (slot->owned && slot->v.p) {
+        if (slot->type == CDM_TYPE_STRING ||
+            slot->type == CDM_TYPE_ARRAY) {
+            free(slot->v.p);
+        }
+    }
+
+    slot->type = CDM_TYPE_STRING;
+    slot->struct_id = -1;
+    slot->array_len = 0;
+    slot->array_dim = 0;
+    slot->array_sizes[0] = slot->array_sizes[1] = slot->array_sizes[2] = slot->array_sizes[3] = 0;
+    slot->array_elem_type = CDM_TYPE_INT;
+    slot->array_elem_struct_id = -1;
+    slot->owned = 1;
+    slot->from_new = 0;
+    slot->v.p = owned_result;
+    return 1;
+}
+
 #define STD1(name, expr) \
     static CDM_Value_t std_##name(int argc, CDM_Value_t* argv) { \
         double x = argc >= 1 ? as_double(argv[0]) : 0.0; \
@@ -101,9 +121,6 @@ static CDM_Value_t std_srand(int argc, CDM_Value_t* argv) {
     return mk_i(0);
 }
 
-// ============================================================
-//  std::string 构造
-// ============================================================
 static CDM_Value_t std_string_ctor(int argc, CDM_Value_t* argv) {
     if (argc < 1) return CDM_MakeString("");
     CDM_Value_t v = CDM_Deref(argv[0]);
@@ -119,9 +136,6 @@ static CDM_Value_t std_string_ctor(int argc, CDM_Value_t* argv) {
     return CDM_MakeString("");
 }
 
-// ============================================================
-//  std::string 方法
-// ============================================================
 static CDM_Value_t str_length(int argc, CDM_Value_t* argv) {
     if (argc < 1) return mk_i(0);
     return mk_i((int64_t)strlen(as_str(argv[0])));
@@ -206,9 +220,6 @@ static CDM_Value_t str_at(int argc, CDM_Value_t* argv) {
     return CDM_MakeString(buf);
 }
 
-// ============================================================
-//  全局字符串函数
-// ============================================================
 static CDM_Value_t std_strlen(int argc, CDM_Value_t* argv) {
     if (argc < 1) return mk_i(0);
     return mk_i((int64_t)strlen(as_str(argv[0])));
@@ -220,9 +231,15 @@ static CDM_Value_t std_strcmp(int argc, CDM_Value_t* argv) {
 static CDM_Value_t std_strcpy(int argc, CDM_Value_t* argv) {
     if (argc < 2) return CDM_MakeString("");
     if (CDM_IsRef(argv[0])) {
-        CDM_Value_t v = CDM_MakeString(as_str(argv[1]));
-        CDM_AssignRef(argv[0], v);
-        return v;
+        char* buf = (char*)malloc(strlen(as_str(argv[1])) + 1);
+        if (!buf) return CDM_MakeString("");
+        strcpy(buf, as_str(argv[1]));
+        if (assign_string_slot(argv[0], buf)) {
+            CDM_Value_t ret = CDM_Deref(argv[0]);
+            ret.owned = 0;
+            return ret;
+        }
+        free(buf);
     }
     return CDM_MakeString(as_str(argv[1]));
 }
@@ -236,12 +253,14 @@ static CDM_Value_t std_strcat(int argc, CDM_Value_t* argv) {
     memcpy(buf, a, la);
     memcpy(buf + la, b, lb);
     buf[la + lb] = '\0';
-    CDM_Value_t res = CDM_MakeStringOwned(buf);
-    if (CDM_IsRef(argv[0])) CDM_AssignRef(argv[0], res);
-    return res;
+    if (assign_string_slot(argv[0], buf)) {
+        CDM_Value_t ret = CDM_Deref(argv[0]);
+        ret.owned = 0;
+        return ret;
+    }
+    return CDM_MakeStringOwned(buf);
 }
 
-/* ★ strncpy(dst, src, n) —— dst 必须是 REF */
 static CDM_Value_t std_strncpy(int argc, CDM_Value_t* argv) {
     if (argc < 3) return CDM_MakeString("");
     const char* src = as_str(argv[1]);
@@ -255,19 +274,14 @@ static CDM_Value_t std_strncpy(int argc, CDM_Value_t* argv) {
     memcpy(buf, src, copy_len);
     buf[copy_len] = '\0';
 
-    if (CDM_IsRef(argv[0])) {
-        CDM_Value_t* slot = CDM_RefPtr(argv[0]);
-        if (slot && slot->type == CDM_TYPE_STRING) {
-            if (slot->owned && slot->v.p) free(slot->v.p);
-            *slot = CDM_MakeStringOwned(buf);
-            CDM_Value_t ret = *slot; ret.owned = 0;
-            return ret;
-        }
+    if (assign_string_slot(argv[0], buf)) {
+        CDM_Value_t ret = CDM_Deref(argv[0]);
+        ret.owned = 0;
+        return ret;
     }
     return CDM_MakeStringOwned(buf);
 }
 
-/* ★ strncmp(a, b, n) */
 static CDM_Value_t std_strncmp(int argc, CDM_Value_t* argv) {
     if (argc < 3) return mk_i(0);
     int n = (int)as_int(argv[2]);
@@ -275,7 +289,6 @@ static CDM_Value_t std_strncmp(int argc, CDM_Value_t* argv) {
     return mk_i(strncmp(as_str(argv[0]), as_str(argv[1]), n));
 }
 
-/* ★ strchr(s, c) —— 返回位置，找不到返回 -1 */
 static CDM_Value_t std_strchr(int argc, CDM_Value_t* argv) {
     if (argc < 2) return mk_i(-1);
     const char* s = as_str(argv[0]);
@@ -284,9 +297,6 @@ static CDM_Value_t std_strchr(int argc, CDM_Value_t* argv) {
     return mk_i(p ? (int64_t)(p - s) : -1);
 }
 
-// ============================================================
-//  数值转换
-// ============================================================
 static CDM_Value_t std_atoi(int argc, CDM_Value_t* argv) {
     return mk_i(argc >= 1 ? (int64_t)atoll(as_str(argv[0])) : 0);
 }
@@ -305,9 +315,6 @@ static CDM_Value_t std_to_string(int argc, CDM_Value_t* argv) {
     return CDM_MakeString(buf);
 }
 
-// ============================================================
-//  格式化器
-// ============================================================
 static char* fmt_impl(const char* fmt, CDM_Value_t* argv, int argc, int first_arg_idx) {
     int cap = 128;
     char* out = (char*)malloc(cap);
@@ -412,22 +419,16 @@ static char* fmt_impl(const char* fmt, CDM_Value_t* argv, int argc, int first_ar
     return out;
 }
 
-// ---- sprintf / snprintf / printf ----
 static CDM_Value_t std_sprintf(int argc, CDM_Value_t* argv) {
     if (argc < 2) return CDM_MakeString("");
     const char* fmt = as_str(argv[1]);
     char* result = fmt_impl(fmt, argv, argc, 2);
     if (!result) return CDM_MakeString("");
 
-    if (CDM_IsRef(argv[0])) {
-        CDM_Value_t* slot = CDM_RefPtr(argv[0]);
-        if (slot && slot->type == CDM_TYPE_STRING) {
-            if (slot->owned && slot->v.p) free(slot->v.p);
-            *slot = CDM_MakeStringOwned(result);
-            CDM_Value_t ret = *slot;
-            ret.owned = 0;
-            return ret;
-        }
+    if (assign_string_slot(argv[0], result)) {
+        CDM_Value_t ret = CDM_Deref(argv[0]);
+        ret.owned = 0;
+        return ret;
     }
     return CDM_MakeStringOwned(result);
 }
@@ -443,15 +444,10 @@ static CDM_Value_t std_snprintf(int argc, CDM_Value_t* argv) {
     int rlen = (int)strlen(result);
     if (rlen >= maxlen) result[maxlen - 1] = '\0';
 
-    if (CDM_IsRef(argv[0])) {
-        CDM_Value_t* slot = CDM_RefPtr(argv[0]);
-        if (slot && slot->type == CDM_TYPE_STRING) {
-            if (slot->owned && slot->v.p) free(slot->v.p);
-            *slot = CDM_MakeStringOwned(result);
-            CDM_Value_t ret = *slot;
-            ret.owned = 0;
-            return ret;
-        }
+    if (assign_string_slot(argv[0], result)) {
+        CDM_Value_t ret = CDM_Deref(argv[0]);
+        ret.owned = 0;
+        return ret;
     }
     return CDM_MakeStringOwned(result);
 }
@@ -467,12 +463,6 @@ static CDM_Value_t std_printf(int argc, CDM_Value_t* argv) {
     return mk_i(n);
 }
 
-// ============================================================
-//  文件 IO
-//  用法：
-//    auto fp = fopen("/littlefs/foo.txt", "w");
-//    if (fp) { fprintf(fp, "hello %d\n", 42); fclose(fp); }
-// ============================================================
 static FILE* as_filep(CDM_Value_t v) {
     v = CDM_Deref(v);
     if (v.type != CDM_TYPE_PTR || !v.v.p) return NULL;
@@ -488,7 +478,7 @@ static CDM_Value_t std_fopen(int argc, CDM_Value_t* argv) {
         printf("[fopen] failed: %s (mode=%s)\n", path, mode);
         return mk_i(0);
     }
-    return CDM_MakePtr(fp, 0);   /* FILE* 由 fclose 管理，不归 CDM 释放 */
+    return CDM_MakePtr(fp, 0);
 }
 
 static CDM_Value_t std_fclose(int argc, CDM_Value_t* argv) {
@@ -518,7 +508,6 @@ static CDM_Value_t std_fputs(int argc, CDM_Value_t* argv) {
     return mk_i(fputs(s, fp));
 }
 
-/* fgets(buf, n, fp) —— buf 是 REF（std::string） */
 static CDM_Value_t std_fgets(int argc, CDM_Value_t* argv) {
     if (argc < 3) return CDM_MakeString("");
     int n = (int)as_int(argv[1]);
@@ -531,22 +520,15 @@ static CDM_Value_t std_fgets(int argc, CDM_Value_t* argv) {
     char* r = fgets(tmp, n, fp);
     if (!r) { free(tmp); return CDM_MakeString(""); }
 
-    /* 去掉尾部换行 */
     size_t L = strlen(tmp);
     if (L > 0 && tmp[L-1] == '\n') tmp[L-1] = '\0';
 
-    CDM_Value_t v = CDM_MakeStringOwned(tmp);
-    if (CDM_IsRef(argv[0])) {
-        CDM_Value_t* slot = CDM_RefPtr(argv[0]);
-        if (slot && slot->type == CDM_TYPE_STRING) {
-            if (slot->owned && slot->v.p) free(slot->v.p);
-            *slot = v;
-            CDM_Value_t ret = *slot;
-            ret.owned = 0;
-            return ret;
-        }
+    if (assign_string_slot(argv[0], tmp)) {
+        CDM_Value_t ret = CDM_Deref(argv[0]);
+        ret.owned = 0;
+        return ret;
     }
-    return v;
+    return CDM_MakeStringOwned(tmp);
 }
 
 static CDM_Value_t std_feof(int argc, CDM_Value_t* argv) {
@@ -566,18 +548,13 @@ static CDM_Value_t std_fread(int argc, CDM_Value_t* argv) {
     if (!tmp) return mk_i(0);
     size_t got = fread(tmp, 1, n, fp);
     tmp[got] = '\0';
-    CDM_Value_t v = CDM_MakeStringOwned(tmp);
-    if (CDM_IsRef(argv[0])) {
-        CDM_Value_t* slot = CDM_RefPtr(argv[0]);
-        if (slot && slot->type == CDM_TYPE_STRING) {
-            if (slot->owned && slot->v.p) free(slot->v.p);
-            *slot = v;
-            CDM_Value_t ret = *slot;
-            ret.owned = 0;
-            return ret;
-        }
+
+    if (assign_string_slot(argv[0], tmp)) {
+        CDM_Value_t ret = CDM_Deref(argv[0]);
+        ret.owned = 0;
+        return ret;
     }
-    return v;
+    return CDM_MakeStringOwned(tmp);
 }
 
 static CDM_Value_t std_fwrite(int argc, CDM_Value_t* argv) {
@@ -589,9 +566,6 @@ static CDM_Value_t std_fwrite(int argc, CDM_Value_t* argv) {
     return mk_i((int64_t)fwrite(s, 1, n, fp));
 }
 
-// ============================================================
-//  注册
-// ============================================================
 void CDM_Std_Init(void) {
     CDM_RegisterHostFuncEx("std::sqrt",  std_sqrt);
     CDM_RegisterHostFuncEx("std::sin",   std_sin);
